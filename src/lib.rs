@@ -1,13 +1,9 @@
 #![feature(futures_api)]
 #![feature(manually_drop_take)]
 #![allow(dead_code)]
-#![cfg_attr(test, feature(test))]
 
-#[cfg(test)]
-extern crate test;
 #[cfg(test)]
 mod tests;
-
 mod waker;
 
 use crossbeam_channel::{self, Receiver, Sender};
@@ -19,6 +15,7 @@ use futures::task::Waker;
 use num_cpus;
 use slotmap::{DefaultKey as Key, SecondaryMap, SlotMap};
 use std::mem::ManuallyDrop;
+use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -31,8 +28,8 @@ pub struct ArcThreadPool {
 }
 
 impl ArcThreadPool {
-    pub fn new() -> Self {
-        let workers = (0..num_cpus::get())
+    pub fn new(threads: usize) -> Self {
+        let workers = (0..threads)
             .map(|_| {
                 let (tx, rx) = crossbeam_channel::unbounded::<Message>();
                 let worker = Worker {
@@ -95,7 +92,7 @@ impl Spawn for ArcThreadPool {
 
 impl Default for ArcThreadPool {
     fn default() -> Self {
-        ArcThreadPool::new()
+        ArcThreadPool::new(num_cpus::get())
     }
 }
 
@@ -157,12 +154,16 @@ impl Worker {
             None => return false,
         };
 
-        if let Poll::Ready(()) = future.poll_unpin(waker) {
-            future_map.remove(key);
-            waker_map.remove(key);
-            self.running_futures.fetch_sub(1, Ordering::Acquire) == 0
-        } else {
-            false
+        // Don't let a panicking poll kill the threadpool
+        let res = panic::catch_unwind(panic::AssertUnwindSafe(|| future.poll_unpin(waker)));
+        match res {
+            Ok(Poll::Ready(())) => {
+                future_map.remove(key);
+                waker_map.remove(key);
+                self.running_futures.fetch_sub(1, Ordering::Acquire) == 0
+            }
+            Ok(Poll::Pending) => false,
+            Err(_) => false,
         }
     }
 }
