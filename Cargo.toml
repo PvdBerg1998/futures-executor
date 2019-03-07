@@ -5,6 +5,7 @@ authors = ["PvdBerg1998 <PvdBerg1998@users.noreply.github.com>"]
 edition = "2018"
 
 [dependencies]
-crossbeam-channel = "0.3.8"
-futures-preview = "0.3.0-alpha.13"
-slotmap = { version = "0.3.0", features = ["unstable"] }
+crossbeam-channel = "^0.3"
+futures-preview = "=0.3.0-alpha.13"
+num_cpus = "^1.10"
+slotmap = { version = "^0.3", features = ["unstable"] }

@@ -16,6 +16,7 @@ use futures::task::Poll;
 use futures::task::Spawn;
 use futures::task::SpawnError;
 use futures::task::Waker;
+use num_cpus;
 use slotmap::{DefaultKey as Key, SecondaryMap, SlotMap};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,8 +32,7 @@ pub struct ArcThreadPool {
 
 impl ArcThreadPool {
     pub fn new() -> Self {
-        // fixme num cpu
-        let workers = (0..4)
+        let workers = (0..num_cpus::get())
             .map(|_| {
                 let (tx, rx) = crossbeam_channel::unbounded::<Message>();
                 let worker = Worker {
@@ -90,6 +90,12 @@ impl Spawn for ArcThreadPool {
             .tx
             .send(Message::PushFuture(future))
             .map_err(|_| SpawnError::shutdown())
+    }
+}
+
+impl Default for ArcThreadPool {
+    fn default() -> Self {
+        ArcThreadPool::new()
     }
 }
 
