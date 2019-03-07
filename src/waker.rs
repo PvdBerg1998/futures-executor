@@ -5,23 +5,24 @@ use futures::task::RawWakerVTable;
 use futures::task::Waker;
 use slotmap::DefaultKey as Key;
 use std::mem;
+use std::sync::Arc;
 
 pub(crate) fn new_waker(send_to: Sender<Message>, key: Key) -> Waker {
     WakerData::new(send_to, key).into_waker()
 }
 
-#[derive(Clone)]
 pub struct WakerData {
     send_to: Sender<Message>,
     key: Key,
 }
 
 unsafe fn waker_clone(data: *const ()) -> RawWaker {
-    let data: Box<WakerData> = Box::from_raw(data as *mut () as *mut WakerData);
-    let data_clone = data.clone();
-    // Don't drop the first box since it's still in use!
-    mem::forget(data);
-    data_clone.into_raw_waker()
+    // Increase strong count
+    let arc: Arc<WakerData> = Arc::from_raw(data as *mut () as *mut WakerData);
+    let arc_clone = arc.clone();
+    mem::forget(arc);
+    mem::forget(arc_clone);
+    RawWaker::new(data, &WAKER_V_TABLE)
 }
 
 unsafe fn waker_wake(data: *const ()) {
@@ -30,7 +31,8 @@ unsafe fn waker_wake(data: *const ()) {
 }
 
 unsafe fn waker_drop(data: *const ()) {
-    let data: Box<WakerData> = Box::from_raw(data as *mut () as *mut WakerData);
+    // Decrease strong count
+    let data: Arc<WakerData> = Arc::from_raw(data as *mut () as *mut WakerData);
     drop(data);
 }
 
@@ -45,13 +47,10 @@ impl WakerData {
         WakerData { send_to, key }
     }
 
-    fn into_raw_waker(self) -> RawWaker {
-        let leaked: *const Self = Box::leak(Box::new(self)) as *const _;
-        let leaked: *const () = leaked as *const _;
-        RawWaker::new(leaked, &WAKER_V_TABLE)
-    }
-
     pub(crate) fn into_waker(self) -> Waker {
-        unsafe { Waker::new_unchecked(self.into_raw_waker()) }
+        let leaked: *const Self = Arc::into_raw(Arc::new(self)) as *const _;
+        let leaked: *const () = leaked as *const _;
+        let raw_waker = RawWaker::new(leaked, &WAKER_V_TABLE);
+        unsafe { Waker::new_unchecked(raw_waker) }
     }
 }
