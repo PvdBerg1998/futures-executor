@@ -9,12 +9,13 @@ const BENCH_AMOUNT: usize = 1000;
 
 #[test]
 fn run_futures() {
-    let mut pool = ArcThreadPool::default();
+    let mut pool = ThreadPool::default();
     let counter = Arc::new(AtomicUsize::new(0));
 
-    for _ in 0..10 {
+    for _i in 0..10 {
         let counter = counter.clone();
         let fut = future::lazy(move |_| {
+            //println!("Add #{}", i);
             counter.fetch_add(1, Ordering::Relaxed);
         });
         pool.spawn(fut).unwrap();
@@ -26,7 +27,7 @@ fn run_futures() {
 
 #[test]
 fn dont_leak_memory() {
-    let mut pool = ArcThreadPool::default();
+    let mut pool = ThreadPool::default();
 
     let shared = Arc::new(());
     for _ in 0..10 {
@@ -43,7 +44,7 @@ fn dont_leak_memory() {
 
 #[test]
 fn panicking_in_poll() {
-    let mut pool = ArcThreadPool::new(1);
+    let mut pool = ThreadPool::new(1);
     let caught_panic = Arc::new(AtomicBool::new(false));
 
     // FIXME: This pollutes the test output, but changing the global panic handler

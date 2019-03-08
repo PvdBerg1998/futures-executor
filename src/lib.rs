@@ -22,12 +22,11 @@ use std::thread;
 
 type DynFuture = futures::future::FutureObj<'static, ()>;
 
-#[derive(Clone)]
-pub struct ArcThreadPool {
-    inner: Arc<ThreadPoolInner>,
+pub struct ThreadPool {
+    workers: Box<[ManuallyDrop<WorkerWithHandle>]>,
 }
 
-impl ArcThreadPool {
+impl ThreadPool {
     pub fn new(threads: usize) -> Self {
         let workers = (0..threads)
             .map(|_| {
@@ -41,29 +40,45 @@ impl ArcThreadPool {
                     let worker = worker.clone();
                     thread::spawn(move || worker.work())
                 };
-                ManuallyDrop::new(WorkerWithHandle { worker, handle })
+                ManuallyDrop::new(WorkerWithHandle {
+                    inner: worker,
+                    handle,
+                })
             })
             .collect::<Vec<ManuallyDrop<WorkerWithHandle>>>()
             .into_boxed_slice();
 
-        ArcThreadPool {
-            inner: Arc::new(ThreadPoolInner { workers }),
-        }
+        ThreadPool { workers }
     }
 
     pub fn wait(self) {
-        for worker in self.inner.workers.iter() {
-            let _ = worker.worker.tx.send(Message::HaltOnEmpty);
+        for worker in self.workers.iter() {
+            let _ = worker.inner.tx.send(Message::HaltOnEmpty);
+        }
+        drop(self);
+    }
+
+    pub fn shutdown_now(self) {
+        for worker in self.workers.iter() {
+            let _ = worker.inner.tx.send(Message::Halt);
         }
         drop(self);
     }
 }
 
-impl Spawn for ArcThreadPool {
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        for worker in self.workers.iter_mut() {
+            let worker = unsafe { ManuallyDrop::take(worker) };
+            let _ = worker.handle.join();
+        }
+    }
+}
+
+impl Spawn for ThreadPool {
     fn spawn_obj(&mut self, future: DynFuture) -> Result<(), SpawnError> {
         // Find best candidate to give future to
         let (least_full_worker, _index, _running_futures) = self
-            .inner
             .workers
             .iter()
             .enumerate()
@@ -71,33 +86,33 @@ impl Spawn for ArcThreadPool {
                 (
                     worker,
                     index,
-                    worker.worker.running_futures.load(Ordering::Acquire),
+                    worker.inner.running_futures.load(Ordering::Acquire),
                 )
             })
             .min_by_key(|(_, _, running_futures)| *running_futures)
             .unwrap();
         // Increase future counter
         least_full_worker
-            .worker
+            .inner
             .running_futures
-            .fetch_add(1, Ordering::Release);
+            .fetch_add(1, Ordering::AcqRel);
         // Send future to worker
         least_full_worker
-            .worker
+            .inner
             .tx
             .send(Message::PushFuture(future))
             .map_err(|_| SpawnError::shutdown())
     }
 }
 
-impl Default for ArcThreadPool {
+impl Default for ThreadPool {
     fn default() -> Self {
-        ArcThreadPool::new(num_cpus::get())
+        ThreadPool::new(num_cpus::get())
     }
 }
 
 struct WorkerWithHandle {
-    worker: Worker,
+    inner: Worker,
     handle: thread::JoinHandle<()>,
 }
 
@@ -132,7 +147,12 @@ impl Worker {
                         return;
                     }
                 }
-                Message::HaltOnEmpty => halt_on_empty = true,
+                Message::HaltOnEmpty => {
+                    halt_on_empty = true;
+                    if self.running_futures.load(Ordering::Acquire) == 0 {
+                        return;
+                    }
+                }
                 Message::Halt => return,
             }
         }
@@ -157,29 +177,13 @@ impl Worker {
         // Don't let a panicking poll kill the threadpool
         let res = panic::catch_unwind(panic::AssertUnwindSafe(|| future.poll_unpin(waker)));
         match res {
-            Ok(Poll::Ready(())) => {
+            Ok(Poll::Ready(())) | Err(_) => {
                 future_map.remove(key);
                 waker_map.remove(key);
-                self.running_futures.fetch_sub(1, Ordering::Acquire) == 0
+                // When the previous value was 1, it's now 0, so the map became empty
+                self.running_futures.fetch_sub(1, Ordering::AcqRel) == 1
             }
             Ok(Poll::Pending) => false,
-            Err(_) => false,
-        }
-    }
-}
-
-struct ThreadPoolInner {
-    workers: Box<[ManuallyDrop<WorkerWithHandle>]>,
-}
-
-impl Drop for ThreadPoolInner {
-    fn drop(&mut self) {
-        for worker in self.workers.iter() {
-            let _ = worker.worker.tx.send(Message::Halt);
-        }
-        for worker in self.workers.iter_mut() {
-            let worker = unsafe { ManuallyDrop::take(worker) };
-            let _ = worker.handle.join();
         }
     }
 }
