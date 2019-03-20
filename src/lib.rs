@@ -7,23 +7,27 @@ mod tests;
 mod waker;
 
 use crossbeam_channel::{self, Receiver, Sender};
-use futures::prelude::*;
-use futures::task::Poll;
-use futures::task::Spawn;
-use futures::task::SpawnError;
-use futures::task::Waker;
+use futures::{
+    executor::block_on,
+    prelude::*,
+    task::{Poll, Spawn, SpawnError, SpawnExt, Waker}
+};
 use num_cpus;
 use slotmap::{DefaultKey as Key, SecondaryMap, SlotMap};
-use std::mem::ManuallyDrop;
-use std::panic;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread;
+use std::{
+    mem::ManuallyDrop,
+    panic,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc
+    },
+    thread
+};
 
 type DynFuture = futures::future::FutureObj<'static, ()>;
 
 pub struct ThreadPool {
-    workers: Box<[ManuallyDrop<WorkerWithHandle>]>,
+    workers: Box<[ManuallyDrop<WorkerWithHandle>]>
 }
 
 impl ThreadPool {
@@ -34,7 +38,7 @@ impl ThreadPool {
                 let worker = Worker {
                     tx,
                     rx,
-                    running_futures: Arc::new(AtomicUsize::new(0)),
+                    running_futures: Arc::new(AtomicUsize::new(0))
                 };
                 let handle = {
                     let worker = worker.clone();
@@ -42,13 +46,22 @@ impl ThreadPool {
                 };
                 ManuallyDrop::new(WorkerWithHandle {
                     inner: worker,
-                    handle,
+                    handle
                 })
             })
             .collect::<Vec<ManuallyDrop<WorkerWithHandle>>>()
             .into_boxed_slice();
 
         ThreadPool { workers }
+    }
+
+    pub fn block_on<F: Future<Output = ()> + Send + 'static>(
+        &mut self,
+        future: F
+    ) -> Result<(), SpawnError> {
+        let (remote, handle) = future.remote_handle();
+        self.spawn(remote)?;
+        Ok(block_on(handle))
     }
 
     pub fn wait(self) {
@@ -58,11 +71,15 @@ impl ThreadPool {
         drop(self);
     }
 
-    pub fn shutdown_now(self) {
+    /// Returns the amount of unfinished futures
+    pub fn shutdown_now(self) -> usize {
+        let mut killed_futures = 0;
         for worker in self.workers.iter() {
             let _ = worker.inner.tx.send(Message::Halt);
+            killed_futures += worker.inner.running_futures.load(Ordering::Acquire);
         }
         drop(self);
+        killed_futures
     }
 }
 
@@ -86,7 +103,7 @@ impl Spawn for ThreadPool {
                 (
                     worker,
                     index,
-                    worker.inner.running_futures.load(Ordering::Acquire),
+                    worker.inner.running_futures.load(Ordering::Acquire)
                 )
             })
             .min_by_key(|(_, _, running_futures)| *running_futures)
@@ -113,14 +130,14 @@ impl Default for ThreadPool {
 
 struct WorkerWithHandle {
     inner: Worker,
-    handle: thread::JoinHandle<()>,
+    handle: thread::JoinHandle<()>
 }
 
 #[derive(Clone)]
 struct Worker {
     tx: Sender<Message>,
     rx: Receiver<Message>,
-    running_futures: Arc<AtomicUsize>,
+    running_futures: Arc<AtomicUsize>
 }
 
 impl Worker {
@@ -153,7 +170,7 @@ impl Worker {
                         return;
                     }
                 }
-                Message::Halt => return,
+                Message::Halt => return
             }
         }
     }
@@ -163,15 +180,15 @@ impl Worker {
         &self,
         future_map: &mut SlotMap<Key, DynFuture>,
         waker_map: &mut SecondaryMap<Key, Waker>,
-        key: Key,
+        key: Key
     ) -> bool {
         let future = match future_map.get_mut(key) {
             Some(future) => future,
-            None => return false,
+            None => return false
         };
         let waker = match waker_map.get(key) {
             Some(waker) => waker,
-            None => return false,
+            None => return false
         };
 
         // Don't let a panicking poll kill the threadpool
@@ -183,7 +200,7 @@ impl Worker {
                 // When the previous value was 1, it's now 0, so the map became empty
                 self.running_futures.fetch_sub(1, Ordering::AcqRel) == 1
             }
-            Ok(Poll::Pending) => false,
+            Ok(Poll::Pending) => false
         }
     }
 }
@@ -192,5 +209,5 @@ enum Message {
     PushFuture(DynFuture),
     WakeFuture(Key),
     HaltOnEmpty,
-    Halt,
+    Halt
 }

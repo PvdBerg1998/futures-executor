@@ -1,11 +1,8 @@
 use crate::Message;
 use crossbeam_channel::Sender;
-use futures::task::RawWaker;
-use futures::task::RawWakerVTable;
-use futures::task::Waker;
+use futures::task::{RawWaker, RawWakerVTable, Waker};
 use slotmap::DefaultKey as Key;
-use std::mem;
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 
 pub(crate) fn new_waker(send_to: Sender<Message>, key: Key) -> Waker {
     WakerData::new(send_to, key).into_waker()
@@ -13,7 +10,7 @@ pub(crate) fn new_waker(send_to: Sender<Message>, key: Key) -> Waker {
 
 pub struct WakerData {
     send_to: Sender<Message>,
-    key: Key,
+    key: Key
 }
 
 unsafe fn waker_clone(data: *const ()) -> RawWaker {
@@ -39,7 +36,7 @@ unsafe fn waker_drop(data: *const ()) {
 const WAKER_V_TABLE: RawWakerVTable = RawWakerVTable {
     clone: waker_clone,
     wake: waker_wake,
-    drop: waker_drop,
+    drop: waker_drop
 };
 
 impl WakerData {

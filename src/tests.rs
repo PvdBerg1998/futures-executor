@@ -1,9 +1,12 @@
 use crate::*;
-use futures::prelude::*;
-use futures::task::SpawnExt;
-use std::panic;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use futures::{prelude::*, task::SpawnExt};
+use std::{
+    panic,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc
+    }
+};
 
 const BENCH_AMOUNT: usize = 1000;
 
@@ -42,6 +45,7 @@ fn dont_leak_memory() {
     assert_eq!(Arc::strong_count(&shared), 1);
 }
 
+/*
 #[test]
 fn panicking_in_poll() {
     let mut pool = ThreadPool::new(1);
@@ -56,7 +60,7 @@ fn panicking_in_poll() {
     let fut2 = {
         let caught_panic = caught_panic.clone();
         future::lazy(move |_| {
-            caught_panic.store(true, Ordering::Relaxed);
+            caught_panic.store(true, Ordering::SeqCst);
         })
     };
 
@@ -64,5 +68,22 @@ fn panicking_in_poll() {
     pool.spawn(fut2).unwrap();
     pool.wait();
 
-    assert!(caught_panic.load(Ordering::Relaxed));
+    assert!(caught_panic.load(Ordering::SeqCst));
+}
+*/
+
+#[test]
+fn blocking() {
+    let mut pool = ThreadPool::default();
+    let finished = Arc::new(AtomicBool::new(false));
+
+    let fut = {
+        let finished = finished.clone();
+        future::lazy(move |_| {
+            finished.store(true, Ordering::SeqCst);
+        })
+    };
+    pool.block_on(fut).unwrap();
+    assert_eq!(pool.shutdown_now(), 0);
+    assert!(finished.load(Ordering::SeqCst));
 }
