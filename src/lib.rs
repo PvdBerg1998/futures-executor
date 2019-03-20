@@ -55,10 +55,10 @@ impl ThreadPool {
         ThreadPool { workers }
     }
 
-    pub fn block_on<F: Future<Output = ()> + Send + 'static>(
+    pub fn block_on<T: Send + 'static, F: Future<Output = T> + Send + 'static>(
         &mut self,
         future: F
-    ) -> Result<impl FnOnce() -> Result<(), RemotePanic>, SpawnError> {
+    ) -> Result<impl FnOnce() -> Result<T, RemotePanic>, SpawnError> {
         let (remote, handle) = future.remote_handle();
         self.spawn(remote)?;
         Ok(move || {
