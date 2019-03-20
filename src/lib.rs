@@ -58,10 +58,12 @@ impl ThreadPool {
     pub fn block_on<F: Future<Output = ()> + Send + 'static>(
         &mut self,
         future: F
-    ) -> Result<(), SpawnError> {
+    ) -> Result<(), BlockError> {
         let (remote, handle) = future.remote_handle();
-        self.spawn(remote)?;
-        Ok(block_on(handle))
+        self.spawn(remote).map_err(|e| BlockError::SpawnError(e))?;
+        // The remote handle will panic if the other end is dropped due to a panic
+        panic::catch_unwind(panic::AssertUnwindSafe(|| block_on(handle)))
+            .map_err(|_| BlockError::RemotePanic)
     }
 
     pub fn wait(self) {
@@ -71,15 +73,11 @@ impl ThreadPool {
         drop(self);
     }
 
-    /// Returns the amount of unfinished futures
-    pub fn shutdown_now(self) -> usize {
-        let mut killed_futures = 0;
+    pub fn shutdown_now(self) {
         for worker in self.workers.iter() {
             let _ = worker.inner.tx.send(Message::Halt);
-            killed_futures += worker.inner.running_futures.load(Ordering::Acquire);
         }
         drop(self);
-        killed_futures
     }
 }
 
@@ -126,6 +124,12 @@ impl Default for ThreadPool {
     fn default() -> Self {
         ThreadPool::new(num_cpus::get())
     }
+}
+
+#[derive(Debug)]
+pub enum BlockError {
+    RemotePanic,
+    SpawnError(SpawnError)
 }
 
 struct WorkerWithHandle {

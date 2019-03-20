@@ -45,7 +45,6 @@ fn dont_leak_memory() {
     assert_eq!(Arc::strong_count(&shared), 1);
 }
 
-/*
 #[test]
 fn panicking_in_poll() {
     let mut pool = ThreadPool::new(1);
@@ -70,7 +69,6 @@ fn panicking_in_poll() {
 
     assert!(caught_panic.load(Ordering::SeqCst));
 }
-*/
 
 #[test]
 fn blocking() {
@@ -83,7 +81,34 @@ fn blocking() {
             finished.store(true, Ordering::SeqCst);
         })
     };
+
     pool.block_on(fut).unwrap();
-    assert_eq!(pool.shutdown_now(), 0);
+    pool.shutdown_now();
+
     assert!(finished.load(Ordering::SeqCst));
+}
+
+#[test]
+fn panicking_in_blocking() {
+    let mut pool = ThreadPool::new(1);
+    let caught_panic = Arc::new(AtomicBool::new(false));
+
+    // FIXME: This pollutes the test output, but changing the global panic handler
+    // would result in no output when another test panics on a different tester thread
+    let fut1 = future::lazy(move |_| {
+        panic!();
+    });
+
+    let fut2 = {
+        let caught_panic = caught_panic.clone();
+        future::lazy(move |_| {
+            caught_panic.store(true, Ordering::SeqCst);
+        })
+    };
+
+    pool.block_on(fut1).unwrap_err();
+    pool.block_on(fut2).unwrap();
+    pool.shutdown_now();
+
+    assert!(caught_panic.load(Ordering::SeqCst));
 }
