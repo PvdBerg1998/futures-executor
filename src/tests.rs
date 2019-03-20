@@ -82,7 +82,7 @@ fn blocking() {
         })
     };
 
-    pool.block_on(fut).unwrap();
+    (pool.block_on(fut).unwrap())().unwrap();
     pool.shutdown_now();
 
     assert!(finished.load(Ordering::SeqCst));
@@ -106,8 +106,8 @@ fn panicking_in_blocking() {
         })
     };
 
-    pool.block_on(fut1).unwrap_err();
-    pool.block_on(fut2).unwrap();
+    (pool.block_on(fut1).unwrap())().unwrap_err();
+    (pool.block_on(fut2).unwrap())().unwrap();
     pool.shutdown_now();
 
     assert!(caught_panic.load(Ordering::SeqCst));

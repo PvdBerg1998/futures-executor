@@ -58,12 +58,14 @@ impl ThreadPool {
     pub fn block_on<F: Future<Output = ()> + Send + 'static>(
         &mut self,
         future: F
-    ) -> Result<(), BlockError> {
+    ) -> Result<impl FnOnce() -> Result<(), RemotePanic>, SpawnError> {
         let (remote, handle) = future.remote_handle();
-        self.spawn(remote).map_err(|e| BlockError::SpawnError(e))?;
-        // The remote handle will panic if the other end is dropped due to a panic
-        panic::catch_unwind(panic::AssertUnwindSafe(|| block_on(handle)))
-            .map_err(|_| BlockError::RemotePanic)
+        self.spawn(remote)?;
+        Ok(move || {
+            // The remote handle will panic if the other end is dropped due to a panic
+            panic::catch_unwind(panic::AssertUnwindSafe(|| block_on(handle)))
+                .map_err(|_| RemotePanic)
+        })
     }
 
     pub fn wait(self) {
@@ -126,11 +128,8 @@ impl Default for ThreadPool {
     }
 }
 
-#[derive(Debug)]
-pub enum BlockError {
-    RemotePanic,
-    SpawnError(SpawnError)
-}
+#[derive(Copy, Clone, Debug)]
+pub struct RemotePanic;
 
 struct WorkerWithHandle {
     inner: Worker,
