@@ -7,38 +7,43 @@ mod tests;
 mod waker;
 
 use crossbeam_channel::{self, Receiver, Sender};
-use futures::{
-    executor::block_on,
-    prelude::*,
-    task::{Poll, Spawn, SpawnError, SpawnExt, Waker}
-};
+use futures::{executor::block_on, prelude::*, task::*};
 use num_cpus;
 use slotmap::{DefaultKey as Key, SecondaryMap, SlotMap};
 use std::{
+    any::Any,
     mem::ManuallyDrop,
     panic,
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex
     },
     thread
 };
 
 type DynFuture = futures::future::FutureObj<'static, ()>;
+type ThreadError = Box<dyn Any + Send + 'static>;
 
 pub struct ThreadPool {
-    workers: Box<[ManuallyDrop<WorkerWithHandle>]>
+    workers: Box<[ManuallyDrop<WorkerWithHandle>]>,
+    poison: Arc<(AtomicBool, AtomicWaker)>,
+    poison_error: Arc<Mutex<Option<ThreadError>>>
 }
 
 impl ThreadPool {
     pub fn new(threads: usize) -> Self {
+        let poison = Arc::new((AtomicBool::new(false), AtomicWaker::new()));
+        let poison_error = Arc::new(Mutex::new(None));
+
         let workers = (0..threads)
             .map(|_| {
                 let (tx, rx) = crossbeam_channel::unbounded::<Message>();
                 let worker = Worker {
                     tx,
                     rx,
-                    running_futures: Arc::new(AtomicUsize::new(0))
+                    running_futures: Arc::new(AtomicUsize::new(0)),
+                    poison: Arc::clone(&poison),
+                    poison_error: Arc::clone(&poison_error)
                 };
                 let handle = {
                     let worker = worker.clone();
@@ -52,20 +57,43 @@ impl ThreadPool {
             .collect::<Vec<ManuallyDrop<WorkerWithHandle>>>()
             .into_boxed_slice();
 
-        ThreadPool { workers }
+        ThreadPool {
+            workers,
+            poison,
+            poison_error
+        }
     }
 
-    pub fn block_on<T: Send + 'static, F: Future<Output = T> + Send + 'static>(
+    pub fn block_on<T: Send + 'static, F: Future<Output = T> + Unpin + Send + 'static>(
         &mut self,
-        future: F
-    ) -> Result<impl FnOnce() -> Result<T, RemotePanic>, SpawnError> {
+        mut future: F
+    ) -> Result<impl FnOnce() -> thread::Result<T>, SpawnError> {
+        let poison = Arc::clone(&self.poison);
+        let poison_error = Arc::clone(&self.poison_error);
+        let future = future::poll_fn(move |waker| {
+            let (ref poisoned, ref poison_waker) = &*poison;
+
+            // Register current local waker to get notified when a spawned task panics
+            poison_waker.register(waker);
+
+            // If any other task panicked, notify the blocking thread
+            if poisoned.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(poison_error.lock().unwrap().take().unwrap()));
+            }
+
+            // Also make sure the contained future does not panic
+            match panic::catch_unwind(panic::AssertUnwindSafe(|| future.poll_unpin(waker))) {
+                Ok(t) => t.map(|r| Ok(r)),
+                Err(e) => return Poll::Ready(Err(e))
+            }
+        });
+
         let (remote, handle) = future.remote_handle();
         self.spawn(remote)?;
-        Ok(move || {
-            // The remote handle will panic if the other end is dropped due to a panic
-            panic::catch_unwind(panic::AssertUnwindSafe(|| block_on(handle)))
-                .map_err(|_| RemotePanic)
-        })
+
+        // The handle panics if the contained future panics, but we caught it so it's fine
+        let blocker = move || block_on(handle);
+        Ok(blocker)
     }
 
     pub fn wait(self) {
@@ -128,9 +156,6 @@ impl Default for ThreadPool {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub struct RemotePanic;
-
 struct WorkerWithHandle {
     inner: Worker,
     handle: thread::JoinHandle<()>
@@ -140,7 +165,9 @@ struct WorkerWithHandle {
 struct Worker {
     tx: Sender<Message>,
     rx: Receiver<Message>,
-    running_futures: Arc<AtomicUsize>
+    running_futures: Arc<AtomicUsize>,
+    poison: Arc<(AtomicBool, AtomicWaker)>,
+    poison_error: Arc<Mutex<Option<ThreadError>>>
 }
 
 impl Worker {
@@ -196,7 +223,8 @@ impl Worker {
 
         // Don't let a panicking poll kill the threadpool
         let res = panic::catch_unwind(panic::AssertUnwindSafe(|| future.poll_unpin(waker)));
-        match res {
+
+        let became_empty = match &res {
             Ok(Poll::Ready(())) | Err(_) => {
                 future_map.remove(key);
                 waker_map.remove(key);
@@ -204,7 +232,17 @@ impl Worker {
                 self.running_futures.fetch_sub(1, Ordering::AcqRel) == 1
             }
             Ok(Poll::Pending) => false
+        };
+
+        // Notify someone listening in block_on if we panicked
+        if let Err(e) = res {
+            let (ref poisoned, ref waker) = &*self.poison;
+            self.poison_error.lock().unwrap().replace(e);
+            poisoned.store(true, Ordering::SeqCst);
+            waker.wake();
         }
+
+        became_empty
     }
 }
 

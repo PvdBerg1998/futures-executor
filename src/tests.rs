@@ -1,5 +1,8 @@
 use crate::*;
-use futures::{prelude::*, task::SpawnExt};
+use futures::{
+    prelude::*,
+    task::{Poll, SpawnExt}
+};
 use std::{
     panic,
     sync::{
@@ -52,9 +55,7 @@ fn panicking_in_poll() {
 
     // FIXME: This pollutes the test output, but changing the global panic handler
     // would result in no output when another test panics on a different tester thread
-    let fut1 = future::lazy(move |_| {
-        panic!();
-    });
+    let fut1 = future::lazy(|_| panic!());
 
     let fut2 = {
         let caught_panic = caught_panic.clone();
@@ -95,9 +96,7 @@ fn panicking_in_blocking() {
 
     // FIXME: This pollutes the test output, but changing the global panic handler
     // would result in no output when another test panics on a different tester thread
-    let fut1 = future::lazy(move |_| {
-        panic!();
-    });
+    let fut1 = future::lazy(move |_| panic!());
 
     let fut2 = {
         let caught_panic = caught_panic.clone();
@@ -111,4 +110,32 @@ fn panicking_in_blocking() {
     pool.shutdown_now();
 
     assert!(caught_panic.load(Ordering::SeqCst));
+}
+
+#[test]
+fn spawned_panic_notification() {
+    let mut pool = ThreadPool::new(2);
+    let ready = Arc::new(AtomicBool::new(false));
+
+    // FIXME: This pollutes the test output, but changing the global panic handler
+    // would result in no output when another test panics on a different tester thread
+    let spawned_fut = {
+        let ready = ready.clone();
+        future::lazy(move |_| {
+            // Spinning here is okay since it will be spawned on a different thread than the block_on local executor
+            while !ready.load(Ordering::SeqCst) {}
+            panic!();
+        })
+    };
+    let block_on_fut = {
+        let ready = ready.clone();
+        future::poll_fn::<(), _>(move |_| {
+            ready.store(true, Ordering::SeqCst);
+            Poll::Pending
+        })
+    };
+
+    pool.spawn(spawned_fut).unwrap();
+    assert!((pool.block_on(block_on_fut).unwrap())().is_err());
+    pool.shutdown_now();
 }
