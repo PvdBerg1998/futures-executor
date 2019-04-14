@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["PvdBerg1998 <PvdBerg1998@users.noreply.github.com>"]
 edition = "2018"
 
+[patch.crates-io]
+futures-preview = { git = "https://github.com/PvdBerg1998/futures-rs", branch = "master" }
+
 [dependencies]
 crossbeam-channel = "^0.3"
 futures-preview = "=0.3.0-alpha.13"

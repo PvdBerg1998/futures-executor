@@ -7,34 +7,42 @@ mod tests;
 mod waker;
 
 use crossbeam_channel::{self, Receiver, Sender};
-use futures::{executor::block_on, prelude::*, task::*};
+use futures::{prelude::*, task::*};
 use num_cpus;
 use slotmap::{DefaultKey as Key, SecondaryMap, SlotMap};
 use std::{
-    any::Any,
     mem::ManuallyDrop,
-    panic,
+    ops::Deref,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex
+        atomic::{AtomicUsize, AtomicBool, Ordering},
+        Arc, Weak
     },
     thread
 };
 
 type DynFuture = futures::future::FutureObj<'static, ()>;
-type ThreadError = Box<dyn Any + Send + 'static>;
 
-pub struct ThreadPool {
-    workers: Box<[ManuallyDrop<WorkerWithHandle>]>,
-    poison: Arc<(AtomicBool, AtomicWaker)>,
-    poison_error: Arc<Mutex<Option<ThreadError>>>
+pub trait SpawnWithContext<T> {
+    fn spawn_obj_with_context<F: FnOnce(&T) -> DynFuture>(
+        &self,
+        generator: F
+    ) -> Result<(), SpawnError>;
+    fn spawn_obj(&self, future: DynFuture) -> Result<(), SpawnError>;
 }
 
-impl ThreadPool {
-    pub fn new(threads: usize) -> Self {
-        let poison = Arc::new((AtomicBool::new(false), AtomicWaker::new()));
-        let poison_error = Arc::new(Mutex::new(None));
+/*
+    OWNED THREADPOOL IMPL
+*/
 
+// Not cloneable, there should be only 1 strong owner of ThreadPoolInner
+// Abusing arc for it's Weak mechanism
+pub struct ThreadPool<T> {
+    inner: Arc<ThreadPoolInner<T>>
+}
+
+impl<T: Send + 'static> ThreadPool<T> {
+    pub fn new(threads: usize, context: T) -> Self {
+        let poisoned = Arc::new(AtomicBool::new(false));
         let workers = (0..threads)
             .map(|_| {
                 let (tx, rx) = crossbeam_channel::unbounded::<Message>();
@@ -42,86 +50,92 @@ impl ThreadPool {
                     tx,
                     rx,
                     running_futures: Arc::new(AtomicUsize::new(0)),
-                    poison: Arc::clone(&poison),
-                    poison_error: Arc::clone(&poison_error)
+                    poisoned: poisoned.clone()
                 };
                 let handle = {
                     let worker = worker.clone();
                     thread::spawn(move || worker.work())
                 };
-                ManuallyDrop::new(WorkerWithHandle {
-                    inner: worker,
-                    handle
-                })
+                ManuallyDrop::new(WorkerThread { worker, handle })
             })
-            .collect::<Vec<ManuallyDrop<WorkerWithHandle>>>()
+            .collect::<Vec<ManuallyDrop<WorkerThread>>>()
             .into_boxed_slice();
 
         ThreadPool {
-            workers,
-            poison,
-            poison_error
+            inner: Arc::new(ThreadPoolInner {
+                context,
+                workers,
+                poisoned,
+                wait_for_empty: false
+            })
         }
     }
 
-    pub fn block_on<T: Send + 'static, F: Future<Output = T> + Unpin + Send + 'static>(
-        &mut self,
-        mut future: F
-    ) -> Result<impl FnOnce() -> thread::Result<T>, SpawnError> {
-        let poison = Arc::clone(&self.poison);
-        let poison_error = Arc::clone(&self.poison_error);
-        let future = future::poll_fn(move |waker| {
-            let (ref poisoned, ref poison_waker) = &*poison;
+    pub fn as_handle(&self) -> ThreadPoolHandle<T> {
+        ThreadPoolHandle {
+            inner: Arc::downgrade(&self.inner)
+        }
+    }
 
-            // Register current local waker to get notified when a spawned task panics
-            poison_waker.register(waker);
-
-            // If any other task panicked, notify the blocking thread
-            if poisoned.load(Ordering::SeqCst) {
-                return Poll::Ready(Err(poison_error.lock().unwrap().take().unwrap()));
+    fn unwrap_inner(self) -> ThreadPoolInner<T> {
+        let mut inner_arc = self.inner;
+        loop {
+            match Arc::try_unwrap(inner_arc) {
+                Ok(inner) => return inner,
+                Err(arc) => inner_arc = arc
             }
-
-            // Also make sure the contained future does not panic
-            match panic::catch_unwind(panic::AssertUnwindSafe(|| future.poll_unpin(waker))) {
-                Ok(t) => t.map(|r| Ok(r)),
-                Err(e) => return Poll::Ready(Err(e))
-            }
-        });
-
-        let (remote, handle) = future.remote_handle();
-        self.spawn(remote)?;
-
-        // The handle panics if the contained future panics, but we caught it so it's fine
-        let blocker = move || block_on(handle);
-        Ok(blocker)
+            thread::yield_now();
+        }
     }
 
     pub fn wait(self) {
-        for worker in self.workers.iter() {
-            let _ = worker.inner.tx.send(Message::HaltOnEmpty);
-        }
-        drop(self);
+        let mut inner = self.unwrap_inner();
+        inner.wait_for_empty = true;
+        drop(inner);
     }
 
-    pub fn shutdown_now(self) {
-        for worker in self.workers.iter() {
-            let _ = worker.inner.tx.send(Message::Halt);
-        }
-        drop(self);
+    pub fn shutdown(self) {
+        let mut inner = self.unwrap_inner();
+        inner.wait_for_empty = false;
+        drop(inner);
     }
 }
 
-impl Drop for ThreadPool {
-    fn drop(&mut self) {
-        for worker in self.workers.iter_mut() {
-            let worker = unsafe { ManuallyDrop::take(worker) };
-            let _ = worker.handle.join();
-        }
+impl Default for ThreadPool<()> {
+    fn default() -> Self {
+        ThreadPool::new(num_cpus::get(), ())
     }
 }
 
-impl Spawn for ThreadPool {
-    fn spawn_obj(&mut self, future: DynFuture) -> Result<(), SpawnError> {
+impl<T> Deref for ThreadPool<T> {
+    type Target = ThreadPoolInner<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+/*
+    THREADPOOL INNER IMPL
+*/
+
+pub struct ThreadPoolInner<T> {
+    context: T,
+    workers: Box<[ManuallyDrop<WorkerThread>]>,
+    // @TODO propagate panics in some way
+    poisoned: Arc<AtomicBool>,
+    wait_for_empty: bool
+}
+
+impl<T> SpawnWithContext<T> for ThreadPoolInner<T> {
+    fn spawn_obj_with_context<F: FnOnce(&T) -> DynFuture>(
+        &self,
+        generator: F
+    ) -> Result<(), SpawnError> {
+        self.spawn_obj(generator(&self.context))
+    }
+
+    fn spawn_obj(&self, future: DynFuture) -> Result<(), SpawnError> {
         // Find best candidate to give future to
         let (least_full_worker, _index, _running_futures) = self
             .workers
@@ -131,33 +145,89 @@ impl Spawn for ThreadPool {
                 (
                     worker,
                     index,
-                    worker.inner.running_futures.load(Ordering::Acquire)
+                    worker.worker.running_futures.load(Ordering::Acquire)
                 )
             })
             .min_by_key(|(_, _, running_futures)| *running_futures)
             .unwrap();
         // Increase future counter
         least_full_worker
-            .inner
+            .worker
             .running_futures
             .fetch_add(1, Ordering::AcqRel);
         // Send future to worker
         least_full_worker
-            .inner
+            .worker
             .tx
             .send(Message::PushFuture(future))
             .map_err(|_| SpawnError::shutdown())
     }
 }
 
-impl Default for ThreadPool {
-    fn default() -> Self {
-        ThreadPool::new(num_cpus::get())
+impl<T> Spawn for ThreadPoolInner<T> {
+    fn spawn_obj(&mut self, future: DynFuture) -> Result<(), SpawnError> {
+        <Self as SpawnWithContext<T>>::spawn_obj(&self, future)
     }
 }
 
-struct WorkerWithHandle {
-    inner: Worker,
+impl<T> Drop for ThreadPoolInner<T> {
+    fn drop(&mut self) {
+        for worker in self.workers.iter() {
+            if self.wait_for_empty {
+                let _ = worker.worker.tx.send(Message::HaltOnEmpty);
+            } else {
+                let _ = worker.worker.tx.send(Message::Halt);
+            }
+        }
+        for worker in self.workers.iter_mut() {
+            let worker = unsafe { ManuallyDrop::take(worker) };
+            let _ = worker.handle.join();
+        }
+    }
+}
+
+/*
+    THREADPOOL CLONEABLE HANDLE IMPL
+*/
+
+#[derive(Clone)]
+pub struct ThreadPoolHandle<T> {
+    inner: Weak<ThreadPoolInner<T>>
+}
+
+impl<T> SpawnWithContext<T> for ThreadPoolHandle<T> {
+    fn spawn_obj_with_context<F: FnOnce(&T) -> DynFuture>(
+        &self,
+        generator: F
+    ) -> Result<(), SpawnError> {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.spawn_obj_with_context(generator)
+        } else {
+            Err(SpawnError::shutdown())
+        }
+    }
+
+    fn spawn_obj(&self, future: DynFuture) -> Result<(), SpawnError> {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.spawn_obj(future)
+        } else {
+            Err(SpawnError::shutdown())
+        }
+    }
+}
+
+impl<T> Spawn for ThreadPoolHandle<T> {
+    fn spawn_obj(&mut self, future: DynFuture) -> Result<(), SpawnError> {
+        <Self as SpawnWithContext<T>>::spawn_obj(&self, future)
+    }
+}
+
+/*
+    WORKER IMPL
+*/
+
+struct WorkerThread {
+    worker: Worker,
     handle: thread::JoinHandle<()>
 }
 
@@ -166,8 +236,7 @@ struct Worker {
     tx: Sender<Message>,
     rx: Receiver<Message>,
     running_futures: Arc<AtomicUsize>,
-    poison: Arc<(AtomicBool, AtomicWaker)>,
-    poison_error: Arc<Mutex<Option<ThreadError>>>
+    poisoned: Arc<AtomicBool>
 }
 
 impl Worker {
@@ -221,28 +290,29 @@ impl Worker {
             None => return false
         };
 
-        // Don't let a panicking poll kill the threadpool
-        let res = panic::catch_unwind(panic::AssertUnwindSafe(|| future.poll_unpin(waker)));
+        // @FIXME Pass context instead of waker
+        let mut ctx = Context::from_waker(waker);
+        let res = future.poll_unpin(&mut ctx);
 
         let became_empty = match &res {
-            Ok(Poll::Ready(())) | Err(_) => {
+            Poll::Ready(()) => {
                 future_map.remove(key);
                 waker_map.remove(key);
                 // When the previous value was 1, it's now 0, so the map became empty
                 self.running_futures.fetch_sub(1, Ordering::AcqRel) == 1
             }
-            Ok(Poll::Pending) => false
+            Poll::Pending => false
         };
 
-        // Notify someone listening in block_on if we panicked
-        if let Err(e) = res {
-            let (ref poisoned, ref waker) = &*self.poison;
-            self.poison_error.lock().unwrap().replace(e);
-            poisoned.store(true, Ordering::SeqCst);
-            waker.wake();
-        }
-
         became_empty
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            self.poisoned.store(true, Ordering::SeqCst);
+        }
     }
 }
 

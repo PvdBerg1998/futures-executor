@@ -22,8 +22,15 @@ unsafe fn waker_clone(data: *const ()) -> RawWaker {
     RawWaker::new(data, &WAKER_V_TABLE)
 }
 
+// Must take ownership of the data (drop it afterwards)
 unsafe fn waker_wake(data: *const ()) {
-    let data: &'static WakerData = &*(data as *const WakerData);
+    waker_wake_by_ref(data);
+    waker_drop(data);
+}
+
+// Must not take ownership of the data
+unsafe fn waker_wake_by_ref(data: *const ()) {
+    let data: &WakerData = &*(data as *const WakerData);
     let _ = data.send_to.send(Message::WakeFuture(data.key));
 }
 
@@ -33,11 +40,8 @@ unsafe fn waker_drop(data: *const ()) {
     drop(data);
 }
 
-const WAKER_V_TABLE: RawWakerVTable = RawWakerVTable {
-    clone: waker_clone,
-    wake: waker_wake,
-    drop: waker_drop
-};
+const WAKER_V_TABLE: RawWakerVTable =
+    RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
 
 impl WakerData {
     pub(crate) fn new(send_to: Sender<Message>, key: Key) -> Self {
@@ -48,6 +52,6 @@ impl WakerData {
         let leaked: *const Self = Arc::into_raw(Arc::new(self)) as *const _;
         let leaked: *const () = leaked as *const _;
         let raw_waker = RawWaker::new(leaked, &WAKER_V_TABLE);
-        unsafe { Waker::new_unchecked(raw_waker) }
+        unsafe { Waker::from_raw(raw_waker) }
     }
 }
