@@ -1,11 +1,12 @@
 use crate::*;
-use futures::prelude::*;
+use futures::{prelude::*, task::SpawnExt};
 use std::{
     panic,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc
-    }
+    },
+    time::Duration
 };
 
 const BENCH_AMOUNT: usize = 1000;
@@ -13,15 +14,15 @@ const BENCH_AMOUNT: usize = 1000;
 #[test]
 fn run_futures() {
     let pool = ThreadPool::default();
+    let mut handle = pool.as_handle();
     let counter = Arc::new(AtomicUsize::new(0));
 
     for _i in 0..10 {
         let counter = counter.clone();
         let fut = future::lazy(move |_| {
-            //println!("Add #{}", i);
             counter.fetch_add(1, Ordering::Relaxed);
         });
-        pool.spawn_obj(fut.boxed().into()).unwrap();
+        handle.spawn(fut).unwrap();
     }
 
     pool.wait();
@@ -31,6 +32,7 @@ fn run_futures() {
 #[test]
 fn dont_leak_memory() {
     let pool = ThreadPool::default();
+    let mut handle = pool.as_handle();
 
     let shared = Arc::new(());
     for _ in 0..10 {
@@ -38,37 +40,12 @@ fn dont_leak_memory() {
         let fut = future::lazy(move |_| {
             let _shared = shared;
         });
-        pool.spawn_obj(fut.boxed().into()).unwrap();
+        handle.spawn(fut).unwrap();
     }
 
     pool.wait();
     assert_eq!(Arc::strong_count(&shared), 1);
 }
-
-/*
-#[test]
-fn panicking_in_poll() {
-    let pool = ThreadPool::new(1, ());
-    let caught_panic = Arc::new(AtomicBool::new(false));
-
-    // @FIXME: This pollutes the test output, but changing the global panic handler
-    // would result in no output when another test panics on a different tester thread
-    let fut1 = future::lazy(|_| panic!());
-
-    let fut2 = {
-        let caught_panic = caught_panic.clone();
-        future::lazy(move |_| {
-            caught_panic.store(true, Ordering::SeqCst);
-        })
-    };
-
-    pool.spawn_obj(fut1.boxed().into()).unwrap();
-    pool.spawn_obj(fut2.boxed().into()).unwrap();
-    pool.wait();
-
-    assert!(caught_panic.load(Ordering::SeqCst));
-}
-*/
 
 #[test]
 fn drop_context() {
@@ -88,19 +65,18 @@ fn drop_context() {
     };
 
     let pool = ThreadPool::new(1, context);
-    let handle = pool.as_handle();
+    let mut handle = pool.as_handle();
 
     drop(pool);
     assert!(was_dropped.load(Ordering::SeqCst));
     assert!(handle.spawn_obj_with_context(|_| panic!()).is_err());
 }
 
-/*
 #[test]
 fn blocking() {
-    let mut pool = ThreadPool::default();
-    let finished = Arc::new(AtomicBool::new(false));
+    let pool = ThreadPool::default();
 
+    let finished = Arc::new(AtomicBool::new(false));
     let fut = {
         let finished = finished.clone();
         future::lazy(move |_| {
@@ -108,62 +84,67 @@ fn blocking() {
         })
     };
 
-    (pool.block_on(fut).unwrap())().unwrap();
-    pool.shutdown_now();
-
+    pool.block_on(fut.boxed().into());
     assert!(finished.load(Ordering::SeqCst));
 }
-*/
 
-/*
 #[test]
-fn panicking_in_blocking() {
-    let mut pool = ThreadPool::new(1, ());
-    let caught_panic = Arc::new(AtomicBool::new(false));
+#[should_panic(expected = "Propagate me")]
+fn panic_propagated_to_blocker() {
+    let pool = ThreadPool::default();
+    let mut handle = pool.as_handle();
 
-    // @FIXME: This pollutes the test output, but changing the global panic handler
-    // would result in no output when another test panics on a different tester thread
-    let fut1 = future::lazy(move |_| panic!());
+    let blocking_fut = future::poll_fn(move |_| {
+        // Cause a panic on a different thread
+        handle
+            .spawn(future::lazy(move |_| panic!("Propagate me")))
+            .unwrap();
+        // Make sure the panicking future actually gets executed
+        Poll::Pending
+    });
 
-    let fut2 = {
-        let caught_panic = caught_panic.clone();
-        future::lazy(move |_| {
-            caught_panic.store(true, Ordering::SeqCst);
-        })
-    };
-
-    (pool.block_on(fut1).unwrap())().unwrap_err();
-    (pool.block_on(fut2).unwrap())().unwrap();
-    pool.shutdown_now();
-
-    assert!(caught_panic.load(Ordering::SeqCst));
+    pool.block_on(blocking_fut.boxed().into());
 }
 
 #[test]
-fn spawned_panic_notification() {
-    let mut pool = ThreadPool::new(2, ());
-    let ready = Arc::new(AtomicBool::new(false));
+fn waiting() {
+    let pool = ThreadPool::default();
+    let mut handle = pool.as_handle();
 
-    // @FIXME: This pollutes the test output, but changing the global panic handler
-    // would result in no output when another test panics on a different tester thread
-    let spawned_fut = {
-        let ready = ready.clone();
-        future::lazy(move |_| {
-            // Spinning here is okay since it will be spawned on a different thread than the block_on local executor
-            while !ready.load(Ordering::SeqCst) {}
-            panic!();
-        })
-    };
-    let block_on_fut = {
-        let ready = ready.clone();
-        future::poll_fn::<(), _>(move |_| {
-            ready.store(true, Ordering::SeqCst);
-            Poll::Pending
-        })
-    };
+    handle.spawn(future::empty()).unwrap();
 
-    pool.spawn(spawned_fut).unwrap();
-    assert!((pool.block_on(block_on_fut).unwrap())().is_err());
-    pool.shutdown_now();
+    // This should block indefinitely, or until we shutdown manually
+    let waiter = thread::spawn(move || {
+        // Wait some time to make sure the future got spawned
+        thread::sleep(Duration::from_secs(1));
+        pool.wait();
+    });
+
+    // Wait some time to make sure we're blocking
+    thread::sleep(Duration::from_secs(1));
+
+    // Kill the pool from the outside
+    handle.shutdown().unwrap();
+
+    // This should finish immediately now
+    waiter.join().unwrap();
 }
-*/
+
+#[test]
+#[should_panic(expected = "Propagate me")]
+fn panic_propagated_to_waiter() {
+    let pool = ThreadPool::default();
+    let mut handle = pool.as_handle();
+
+    let fut = future::poll_fn(move |_| {
+        // Cause a panic on a different thread
+        handle
+            .spawn(future::lazy(move |_| panic!("Propagate me")))
+            .unwrap();
+        // Make sure the panicking future actually gets executed
+        Poll::Pending
+    });
+
+    pool.as_handle().spawn(fut).unwrap();
+    pool.wait();
+}

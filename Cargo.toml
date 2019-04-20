@@ -4,11 +4,8 @@ version = "0.1.0"
 authors = ["PvdBerg1998 <PvdBerg1998@users.noreply.github.com>"]
 edition = "2018"
 
-[patch.crates-io]
-futures-preview = { git = "https://github.com/PvdBerg1998/futures-rs", branch = "master" }
-
 [dependencies]
 crossbeam-channel = "^0.3"
-futures-preview = "=0.3.0-alpha.13"
+futures-preview = "=0.3.0-alpha.14"
 num_cpus = "^1.10"
 slotmap = { version = "^0.3", features = ["unstable"] }
