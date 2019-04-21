@@ -13,10 +13,10 @@ use num_cpus;
 use slotmap::{DefaultKey as Key, SecondaryMap, SlotMap};
 use std::{
     any::Any,
-    panic,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Condvar, Mutex, Weak
+        Arc, Mutex, Weak
     },
     thread
 };
@@ -35,16 +35,14 @@ pub trait SpawnWithContext<T>: Spawn {
 */
 
 pub struct ThreadPool<T> {
-    inner: Arc<ThreadPoolInner<T>>,
-    panic_propagator: Arc<PanicPropagator>
+    inner: Arc<ThreadPoolInner<T>>
 }
 
 impl<T: Send + 'static> ThreadPool<T> {
     /// Creates a new, standalone threadpool
     pub fn new(threads: usize, context: T) -> Self {
         let global_running_futures = Arc::new(AtomicUsize::new(0));
-        let idle_waiter = Arc::new((Mutex::new(()), Condvar::new()));
-        let panic_propagator = Arc::new(PanicPropagator::new(idle_waiter.clone()));
+        let notifier = Arc::new(Notifier::new());
 
         let workers = (0..threads)
             .map(|_| {
@@ -54,16 +52,14 @@ impl<T: Send + 'static> ThreadPool<T> {
                     rx,
                     running_futures: Arc::new(AtomicUsize::new(0)),
                     global_running_futures: global_running_futures.clone(),
-                    idle_waiter: idle_waiter.clone()
+                    notifier: notifier.clone()
                 };
                 let handle = {
                     let worker = worker.clone();
-                    let panic_propagator = panic_propagator.clone();
+                    let notifier = notifier.clone();
                     thread::spawn(move || {
-                        if let Err(e) =
-                            panic::catch_unwind(panic::AssertUnwindSafe(|| worker.work()))
-                        {
-                            panic_propagator.propagate(e);
+                        if let Err(e) = catch_unwind(AssertUnwindSafe(|| worker.work())) {
+                            notifier.propagate_panic(e);
                         }
                     })
                 };
@@ -80,9 +76,8 @@ impl<T: Send + 'static> ThreadPool<T> {
                 context,
                 workers,
                 global_running_futures,
-                idle_waiter
-            }),
-            panic_propagator
+                notifier
+            })
         }
     }
 
@@ -98,32 +93,34 @@ impl<T: Send + 'static> ThreadPool<T> {
     }
 
     pub fn wait(self) {
-        let &(ref lock, ref cvar) = &*self.inner.idle_waiter;
-        let mut guard = lock.lock().unwrap();
-        while !self.is_idle() {
-            guard = cvar.wait(guard).unwrap();
-            if self.panic_propagator.did_panic() {
-                self.panic_propagator.resume_unwind();
+        block_on(future::poll_fn(move |ctx: &mut Context| {
+            self.inner.notifier.register_waker(ctx);
+            if self.is_idle() || self.inner.notifier.did_panic() {
+                self.inner.shutdown();
+                self.inner.notifier.try_resume_unwind();
+                Poll::Ready(())
+            } else {
+                Poll::Pending
             }
-        }
-        self.inner.shutdown();
+        }));
     }
 
     pub fn block_on(self, mut future: DynFuture) {
-        let panic_propagator = self.panic_propagator.clone();
-        let panic_checking_future = future::poll_fn(move |ctx: &mut Context| {
-            if panic_propagator.did_panic_with_waker(ctx) {
-                return Poll::Ready(Err(()));
+        block_on(future::poll_fn(move |ctx: &mut Context| {
+            self.inner.notifier.register_waker(ctx);
+            if self.inner.notifier.did_panic() {
+                self.inner.shutdown();
+                self.inner.notifier.try_resume_unwind();
+                Poll::Ready(())
+            } else {
+                if future.poll_unpin(ctx).is_ready() {
+                    self.inner.shutdown();
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
             }
-            future.poll_unpin(ctx).map(Ok)
-        });
-
-        // Finish blocking future or resume unwind if a worker panicked
-        if block_on(panic_checking_future).is_err() {
-            self.panic_propagator.resume_unwind();
-        }
-
-        self.inner.shutdown();
+        }));
     }
 }
 
@@ -141,7 +138,7 @@ pub struct ThreadPoolInner<T> {
     context: T,
     workers: Box<[WorkerThread]>,
     global_running_futures: Arc<AtomicUsize>,
-    idle_waiter: Arc<(Mutex<()>, Condvar)>
+    notifier: Arc<Notifier>
 }
 
 impl<T> ThreadPoolInner<T> {
@@ -159,7 +156,7 @@ impl<T> ThreadPoolInner<T> {
         }
 
         // Notify any waiter we're finished
-        self.idle_waiter.1.notify_one();
+        self.notifier.notify();
     }
 
     fn spawn_obj(&self, future: DynFuture) -> Result<(), SpawnError> {
@@ -260,7 +257,7 @@ struct Worker {
     rx: Receiver<Message>,
     running_futures: Arc<AtomicUsize>,
     global_running_futures: Arc<AtomicUsize>,
-    idle_waiter: Arc<(Mutex<()>, Condvar)>
+    notifier: Arc<Notifier>
 }
 
 impl Worker {
@@ -317,7 +314,7 @@ impl Worker {
             waker_map.remove(key);
             self.running_futures.fetch_sub(1, Ordering::Release);
             if self.global_running_futures.fetch_sub(1, Ordering::AcqRel) - 1 == 0 {
-                self.idle_waiter.1.notify_one();
+                self.notifier.notify();
             }
         }
     }
@@ -333,40 +330,42 @@ enum Message {
     PANIC PROPAGATOR IMPL
 */
 
-struct PanicPropagator {
+struct Notifier {
     poisoned: AtomicBool,
     poison_waker: AtomicWaker,
-    idle_waiter: Arc<(Mutex<()>, Condvar)>,
     error: Mutex<Option<Box<dyn Any + Send + 'static>>>
 }
 
-impl PanicPropagator {
-    fn new(idle_waiter: Arc<(Mutex<()>, Condvar)>) -> Self {
-        PanicPropagator {
+impl Notifier {
+    fn new() -> Self {
+        Notifier {
             poisoned: AtomicBool::new(false),
             poison_waker: AtomicWaker::new(),
-            idle_waiter,
             error: Mutex::new(None)
         }
     }
 
-    fn resume_unwind(&self) {
-        panic::resume_unwind(self.error.lock().unwrap().take().unwrap())
+    fn register_waker(&self, ctx: &mut Context) {
+        self.poison_waker.register(&ctx.waker());
     }
 
-    fn did_panic_with_waker(&self, ctx: &mut Context) -> bool {
-        self.poison_waker.register(&ctx.waker());
-        self.poisoned.load(Ordering::SeqCst)
+    fn notify(&self) {
+        self.poison_waker.wake();
     }
 
     fn did_panic(&self) -> bool {
         self.poisoned.load(Ordering::SeqCst)
     }
 
-    fn propagate(&self, error: Box<dyn Any + Send + 'static>) {
+    fn try_resume_unwind(&self) {
+        if self.did_panic() {
+            resume_unwind(self.error.lock().unwrap().take().unwrap())
+        }
+    }
+
+    fn propagate_panic(&self, error: Box<dyn Any + Send + 'static>) {
         self.error.lock().unwrap().replace(error);
         self.poisoned.store(true, Ordering::SeqCst);
-        self.poison_waker.wake();
-        self.idle_waiter.1.notify_one();
+        self.notify();
     }
 }
