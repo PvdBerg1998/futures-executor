@@ -81,6 +81,10 @@ impl<T: Send + 'static> ThreadPool<T> {
         }
     }
 
+    pub fn get_context(&self) -> &T {
+        &self.inner.context
+    }
+
     /// Creates a new cloneable handle to the threadpool
     pub fn as_handle(&self) -> ThreadPoolHandle<T> {
         ThreadPoolHandle {
