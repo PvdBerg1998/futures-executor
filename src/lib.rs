@@ -21,7 +21,7 @@ use std::{
     thread
 };
 
-type DynFuture = futures::future::FutureObj<'static, ()>;
+pub type DynFuture = futures::future::FutureObj<'static, ()>;
 
 pub trait SpawnWithContext<T>: Spawn {
     fn spawn_obj_with_context<F: FnOnce(&T) -> DynFuture>(
