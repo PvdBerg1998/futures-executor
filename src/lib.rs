@@ -205,6 +205,12 @@ pub struct ThreadPoolHandle<T> {
 }
 
 impl<T> ThreadPoolHandle<T> {
+    pub fn with_context<F: FnOnce(&T) -> ()>(&self, f: F) {
+        if let Some(inner) = self.inner.upgrade() {
+            f(&inner.context);
+        }
+    }
+
     pub fn shutdown(&self) -> Result<(), ()> {
         if let Some(inner) = self.inner.upgrade() {
             inner.shutdown();
