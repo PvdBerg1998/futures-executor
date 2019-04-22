@@ -134,7 +134,7 @@ impl Default for ThreadPool<()> {
     THREADPOOL INNER IMPL
 */
 
-pub struct ThreadPoolInner<T> {
+struct ThreadPoolInner<T> {
     context: T,
     workers: Box<[WorkerThread]>,
     global_running_futures: Arc<AtomicUsize>,
