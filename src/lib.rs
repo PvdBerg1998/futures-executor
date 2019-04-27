@@ -200,7 +200,17 @@ impl Clone for ThreadPoolHandle {
 impl ThreadPoolHandle {
     pub fn shutdown(&self) -> Result<(), ()> {
         if let Some(inner) = self.inner.upgrade() {
-            inner.shutdown();
+            // NB. Can't just call inner.shutdown(),
+            // since this can be called from inside a future,
+            // which will deadlock joining the executing thread!
+
+            // Send halt message to worker threads
+            for worker in inner.workers.iter() {
+                let _ = worker.worker.tx.send(Message::Halt);
+            }
+
+            // Notify any waiter
+            inner.notifier.notify();
             Ok(())
         } else {
             Err(())
