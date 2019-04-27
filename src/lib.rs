@@ -1,4 +1,3 @@
-#![feature(futures_api)]
 #![feature(manually_drop_take)]
 #![feature(weak_counts)]
 #![allow(dead_code)]
@@ -212,9 +211,16 @@ impl<T> ThreadPoolInner<T> {
     THREADPOOL CLONEABLE HANDLE IMPL
 */
 
-#[derive(Clone)]
 pub struct ThreadPoolHandle<T> {
     inner: Weak<ThreadPoolInner<T>>
+}
+
+impl<T> Clone for ThreadPoolHandle<T> {
+    fn clone(&self) -> Self {
+        ThreadPoolHandle {
+            inner: self.inner.clone()
+        }
+    }
 }
 
 impl<T> ThreadPoolHandle<T> {
