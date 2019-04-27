@@ -96,8 +96,19 @@ impl<T: Send + 'static> ThreadPool<T> {
         self.inner.global_running_futures.load(Ordering::Acquire) == 0
     }
 
+    fn wait_for_arc(self) {
+        let mut arc = self.inner;
+        loop {
+            match Arc::try_unwrap(arc) {
+                Ok(_) => return,
+                Err(a) => arc = a
+            };
+            thread::yield_now();
+        }
+    }
+
     pub fn wait(self) {
-        block_on(future::poll_fn(move |ctx: &mut Context| {
+        block_on(future::poll_fn(|ctx: &mut Context| {
             self.inner.notifier.register_waker(ctx);
             if self.is_idle() || self.inner.notifier.did_panic() {
                 self.inner.shutdown();
@@ -107,10 +118,11 @@ impl<T: Send + 'static> ThreadPool<T> {
                 Poll::Pending
             }
         }));
+        self.wait_for_arc();
     }
 
     pub fn block_on(self, mut future: DynFuture) {
-        block_on(future::poll_fn(move |ctx: &mut Context| {
+        block_on(future::poll_fn(|ctx: &mut Context| {
             self.inner.notifier.register_waker(ctx);
             if self.inner.notifier.did_panic() {
                 self.inner.shutdown();
@@ -125,6 +137,7 @@ impl<T: Send + 'static> ThreadPool<T> {
                 }
             }
         }));
+        self.wait_for_arc();
     }
 }
 
@@ -205,12 +218,6 @@ pub struct ThreadPoolHandle<T> {
 }
 
 impl<T> ThreadPoolHandle<T> {
-    pub fn with_context<F: FnOnce(&T) -> ()>(&self, f: F) {
-        if let Some(inner) = self.inner.upgrade() {
-            f(&inner.context);
-        }
-    }
-
     pub fn shutdown(&self) -> Result<(), ()> {
         if let Some(inner) = self.inner.upgrade() {
             inner.shutdown();
@@ -342,7 +349,7 @@ enum Message {
 
 struct Notifier {
     poisoned: AtomicBool,
-    poison_waker: AtomicWaker,
+    waker: AtomicWaker,
     error: Mutex<Option<Box<dyn Any + Send + 'static>>>
 }
 
@@ -350,17 +357,17 @@ impl Notifier {
     fn new() -> Self {
         Notifier {
             poisoned: AtomicBool::new(false),
-            poison_waker: AtomicWaker::new(),
+            waker: AtomicWaker::new(),
             error: Mutex::new(None)
         }
     }
 
     fn register_waker(&self, ctx: &mut Context) {
-        self.poison_waker.register(&ctx.waker());
+        self.waker.register(&ctx.waker());
     }
 
     fn notify(&self) {
-        self.poison_waker.wake();
+        self.waker.wake();
     }
 
     fn did_panic(&self) -> bool {
