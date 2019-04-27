@@ -48,31 +48,6 @@ fn dont_leak_memory() {
 }
 
 #[test]
-fn drop_context() {
-    struct NotifyOnDrop {
-        was_dropped: Arc<AtomicBool>
-    }
-
-    impl Drop for NotifyOnDrop {
-        fn drop(&mut self) {
-            self.was_dropped.store(true, Ordering::SeqCst);
-        }
-    }
-
-    let was_dropped = Arc::new(AtomicBool::new(false));
-    let context = NotifyOnDrop {
-        was_dropped: was_dropped.clone()
-    };
-
-    let pool = ThreadPool::new(1, context);
-    let mut handle = pool.as_handle();
-
-    drop(pool);
-    assert!(was_dropped.load(Ordering::SeqCst));
-    assert!(handle.spawn_obj_with_context(|_| panic!()).is_err());
-}
-
-#[test]
 fn blocking() {
     let pool = ThreadPool::default();
 

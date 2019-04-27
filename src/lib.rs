@@ -22,24 +22,17 @@ use std::{
 
 pub type DynFuture = futures::future::FutureObj<'static, ()>;
 
-pub trait SpawnWithContext<T>: Spawn {
-    fn spawn_obj_with_context<F: FnOnce(&T) -> DynFuture>(
-        &mut self,
-        generator: F
-    ) -> Result<(), SpawnError>;
-}
-
 /*
     OWNED THREADPOOL IMPL
 */
 
-pub struct ThreadPool<T> {
-    inner: Arc<ThreadPoolInner<T>>
+pub struct ThreadPool {
+    inner: Arc<ThreadPoolInner>
 }
 
-impl<T: Send + 'static> ThreadPool<T> {
+impl ThreadPool {
     /// Creates a new, standalone threadpool
-    pub fn new(threads: usize, context: T) -> Self {
+    pub fn new(threads: usize) -> Self {
         let global_running_futures = Arc::new(AtomicUsize::new(0));
         let notifier = Arc::new(Notifier::new());
 
@@ -72,7 +65,6 @@ impl<T: Send + 'static> ThreadPool<T> {
 
         ThreadPool {
             inner: Arc::new(ThreadPoolInner {
-                context,
                 workers,
                 global_running_futures,
                 notifier
@@ -80,12 +72,8 @@ impl<T: Send + 'static> ThreadPool<T> {
         }
     }
 
-    pub fn get_context(&self) -> &T {
-        &self.inner.context
-    }
-
     /// Creates a new cloneable handle to the threadpool
-    pub fn as_handle(&self) -> ThreadPoolHandle<T> {
+    pub fn as_handle(&self) -> ThreadPoolHandle {
         ThreadPoolHandle {
             inner: Arc::downgrade(&self.inner)
         }
@@ -93,17 +81,6 @@ impl<T: Send + 'static> ThreadPool<T> {
 
     pub fn is_idle(&self) -> bool {
         self.inner.global_running_futures.load(Ordering::Acquire) == 0
-    }
-
-    fn wait_for_arc(self) {
-        let mut arc = self.inner;
-        loop {
-            match Arc::try_unwrap(arc) {
-                Ok(_) => return,
-                Err(a) => arc = a
-            };
-            thread::yield_now();
-        }
     }
 
     pub fn wait(self) {
@@ -117,7 +94,6 @@ impl<T: Send + 'static> ThreadPool<T> {
                 Poll::Pending
             }
         }));
-        self.wait_for_arc();
     }
 
     pub fn block_on(self, mut future: DynFuture) {
@@ -136,13 +112,12 @@ impl<T: Send + 'static> ThreadPool<T> {
                 }
             }
         }));
-        self.wait_for_arc();
     }
 }
 
-impl Default for ThreadPool<()> {
+impl Default for ThreadPool {
     fn default() -> Self {
-        ThreadPool::new(num_cpus::get(), ())
+        ThreadPool::new(num_cpus::get())
     }
 }
 
@@ -150,14 +125,13 @@ impl Default for ThreadPool<()> {
     THREADPOOL INNER IMPL
 */
 
-struct ThreadPoolInner<T> {
-    context: T,
+struct ThreadPoolInner {
     workers: Box<[WorkerThread]>,
     global_running_futures: Arc<AtomicUsize>,
     notifier: Arc<Notifier>
 }
 
-impl<T> ThreadPoolInner<T> {
+impl ThreadPoolInner {
     fn shutdown(&self) {
         // Send halt message to worker threads
         for worker in self.workers.iter() {
@@ -211,11 +185,11 @@ impl<T> ThreadPoolInner<T> {
     THREADPOOL CLONEABLE HANDLE IMPL
 */
 
-pub struct ThreadPoolHandle<T> {
-    inner: Weak<ThreadPoolInner<T>>
+pub struct ThreadPoolHandle {
+    inner: Weak<ThreadPoolInner>
 }
 
-impl<T> Clone for ThreadPoolHandle<T> {
+impl Clone for ThreadPoolHandle {
     fn clone(&self) -> Self {
         ThreadPoolHandle {
             inner: self.inner.clone()
@@ -223,7 +197,7 @@ impl<T> Clone for ThreadPoolHandle<T> {
     }
 }
 
-impl<T> ThreadPoolHandle<T> {
+impl ThreadPoolHandle {
     pub fn shutdown(&self) -> Result<(), ()> {
         if let Some(inner) = self.inner.upgrade() {
             inner.shutdown();
@@ -234,20 +208,7 @@ impl<T> ThreadPoolHandle<T> {
     }
 }
 
-impl<T> SpawnWithContext<T> for ThreadPoolHandle<T> {
-    fn spawn_obj_with_context<F: FnOnce(&T) -> DynFuture>(
-        &mut self,
-        generator: F
-    ) -> Result<(), SpawnError> {
-        if let Some(inner) = self.inner.upgrade() {
-            inner.spawn_obj(generator(&inner.context))
-        } else {
-            Err(SpawnError::shutdown())
-        }
-    }
-}
-
-impl<T> Spawn for ThreadPoolHandle<T> {
+impl Spawn for ThreadPoolHandle {
     fn spawn_obj(&mut self, future: DynFuture) -> Result<(), SpawnError> {
         if let Some(inner) = self.inner.upgrade() {
             inner.spawn_obj(future)
