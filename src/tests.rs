@@ -59,7 +59,7 @@ fn blocking() {
         })
     };
 
-    pool.block_on(fut.boxed().into());
+    pool.block_on(fut);
     assert!(finished.load(Ordering::SeqCst));
 }
 
@@ -78,7 +78,7 @@ fn panic_propagated_to_blocker() {
         Poll::Pending
     });
 
-    pool.block_on(blocking_fut.boxed().into());
+    pool.block_on(blocking_fut);
 }
 
 #[test]

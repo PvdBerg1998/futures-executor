@@ -9,6 +9,7 @@ mod waker;
 use crossbeam_channel::{self, Receiver, Sender};
 use futures::{executor::block_on, prelude::*, task::*};
 use num_cpus;
+use pin_utils::pin_mut;
 use slotmap::{DefaultKey as Key, SecondaryMap, SlotMap};
 use std::{
     any::Any,
@@ -20,7 +21,7 @@ use std::{
     thread
 };
 
-pub type DynFuture = futures::future::FutureObj<'static, ()>;
+type FutureObj = futures::future::FutureObj<'static, ()>;
 
 /*
     OWNED THREADPOOL IMPL
@@ -86,7 +87,10 @@ impl ThreadPool {
     pub fn wait(self) {
         block_on(future::poll_fn(|ctx: &mut Context| {
             self.inner.notifier.register_waker(ctx);
-            if self.is_idle() || self.inner.notifier.is_shutting_down() || self.inner.notifier.did_panic() {
+            if self.is_idle()
+                || self.inner.notifier.is_shutting_down()
+                || self.inner.notifier.did_panic()
+            {
                 self.inner.shutdown();
                 self.inner.notifier.try_resume_unwind();
                 Poll::Ready(())
@@ -96,7 +100,8 @@ impl ThreadPool {
         }));
     }
 
-    pub fn block_on(self, mut future: DynFuture) {
+    pub fn block_on<F: Future<Output = ()>>(self, future: F) {
+        pin_mut!(future);
         block_on(future::poll_fn(|ctx: &mut Context| {
             self.inner.notifier.register_waker(ctx);
             if self.inner.notifier.is_shutting_down() || self.inner.notifier.did_panic() {
@@ -104,7 +109,7 @@ impl ThreadPool {
                 self.inner.notifier.try_resume_unwind();
                 Poll::Ready(())
             } else {
-                if future.poll_unpin(ctx).is_ready() {
+                if future.as_mut().poll(ctx).is_ready() {
                     self.inner.shutdown();
                     Poll::Ready(())
                 } else {
@@ -146,7 +151,7 @@ impl ThreadPoolInner {
         }
     }
 
-    fn spawn_obj(&self, future: DynFuture) -> Result<(), SpawnError> {
+    fn spawn_obj(&self, future: FutureObj) -> Result<(), SpawnError> {
         // Find best candidate to give future to
         let (least_full_worker, _index, _running_futures) = self
             .workers
@@ -217,7 +222,7 @@ impl ThreadPoolHandle {
 }
 
 impl Spawn for ThreadPoolHandle {
-    fn spawn_obj(&mut self, future: DynFuture) -> Result<(), SpawnError> {
+    fn spawn_obj(&mut self, future: FutureObj) -> Result<(), SpawnError> {
         if let Some(inner) = self.inner.upgrade() {
             inner.spawn_obj(future)
         } else {
@@ -254,7 +259,7 @@ struct Worker {
 
 impl Worker {
     fn work(&self) {
-        let mut future_map: SlotMap<Key, DynFuture> = SlotMap::new();
+        let mut future_map: SlotMap<Key, FutureObj> = SlotMap::new();
         let mut waker_map: SecondaryMap<Key, Waker> = SecondaryMap::new();
 
         for message in self.rx.iter() {
@@ -285,7 +290,7 @@ impl Worker {
     // Returns true if futures map became empty
     fn poll_future(
         &self,
-        future_map: &mut SlotMap<Key, DynFuture>,
+        future_map: &mut SlotMap<Key, FutureObj>,
         waker_map: &mut SecondaryMap<Key, Waker>,
         key: Key
     ) {
@@ -314,7 +319,7 @@ impl Worker {
 }
 
 enum Message {
-    PushFuture(DynFuture),
+    PushFuture(FutureObj),
     WakeFuture(Key),
     Halt
 }
