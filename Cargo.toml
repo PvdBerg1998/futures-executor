@@ -6,6 +6,6 @@ edition = "2018"
 
 [dependencies]
 crossbeam-channel = "^0.3"
-futures-preview = "=0.3.0-alpha.14"
+futures-preview = "=0.3.0-alpha.15"
 num_cpus = "^1.10"
 slotmap = { version = "^0.3", features = ["unstable"] }
