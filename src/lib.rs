@@ -86,7 +86,7 @@ impl ThreadPool {
     pub fn wait(self) {
         block_on(future::poll_fn(|ctx: &mut Context| {
             self.inner.notifier.register_waker(ctx);
-            if self.is_idle() || self.inner.notifier.did_panic() {
+            if self.is_idle() || self.inner.notifier.is_shutting_down() || self.inner.notifier.did_panic() {
                 self.inner.shutdown();
                 self.inner.notifier.try_resume_unwind();
                 Poll::Ready(())
@@ -99,7 +99,7 @@ impl ThreadPool {
     pub fn block_on(self, mut future: DynFuture) {
         block_on(future::poll_fn(|ctx: &mut Context| {
             self.inner.notifier.register_waker(ctx);
-            if self.inner.notifier.did_panic() {
+            if self.inner.notifier.is_shutting_down() || self.inner.notifier.did_panic() {
                 self.inner.shutdown();
                 self.inner.notifier.try_resume_unwind();
                 Poll::Ready(())
@@ -144,9 +144,6 @@ impl ThreadPoolInner {
                 let _ = handle.join();
             }
         }
-
-        // Notify any waiter we're finished
-        self.notifier.notify();
     }
 
     fn spawn_obj(&self, future: DynFuture) -> Result<(), SpawnError> {
@@ -200,17 +197,18 @@ impl Clone for ThreadPoolHandle {
 impl ThreadPoolHandle {
     pub fn shutdown(&self) -> Result<(), ()> {
         if let Some(inner) = self.inner.upgrade() {
-            // NB. Can't just call inner.shutdown(),
+            // NB. We cant join the worker threads here,
             // since this can be called from inside a future,
-            // which will deadlock joining the executing thread!
+            // which will deadlock that thread.
 
-            // Send halt message to worker threads
+            // Send halt message to worker threads.
+            // This is necessary since there may not be any waiter to do this for us
             for worker in inner.workers.iter() {
                 let _ = worker.worker.tx.send(Message::Halt);
             }
 
-            // Notify any waiter
-            inner.notifier.notify();
+            // Notify any waiters that they should join the threads
+            inner.notifier.notify_shutdown();
             Ok(())
         } else {
             Err(())
@@ -307,6 +305,7 @@ impl Worker {
             future_map.remove(key);
             waker_map.remove(key);
             self.running_futures.fetch_sub(1, Ordering::Release);
+            // If there are no more futures, notify wakers so they can shutdown (or not)
             if self.global_running_futures.fetch_sub(1, Ordering::AcqRel) - 1 == 0 {
                 self.notifier.notify();
             }
@@ -321,11 +320,12 @@ enum Message {
 }
 
 /*
-    PANIC PROPAGATOR IMPL
+    NOTIFIER IMPL
 */
 
 struct Notifier {
     poisoned: AtomicBool,
+    shutting_down: AtomicBool,
     waker: AtomicWaker,
     error: Mutex<Option<Box<dyn Any + Send + 'static>>>
 }
@@ -334,6 +334,7 @@ impl Notifier {
     fn new() -> Self {
         Notifier {
             poisoned: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
             waker: AtomicWaker::new(),
             error: Mutex::new(None)
         }
@@ -345,6 +346,15 @@ impl Notifier {
 
     fn notify(&self) {
         self.waker.wake();
+    }
+
+    fn notify_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.notify();
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
     }
 
     fn did_panic(&self) -> bool {
