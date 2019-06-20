@@ -1,4 +1,3 @@
-#![feature(manually_drop_take)]
 #![feature(weak_counts)]
 #![allow(dead_code)]
 
