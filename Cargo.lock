@@ -7,11 +7,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "crossbeam-channel"
-version = "0.3.8"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "crossbeam-utils 0.6.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "smallvec 0.6.10 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -74,7 +73,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 name = "futures-threadpool"
 version = "0.1.0"
 dependencies = [
- "crossbeam-channel 0.3.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "crossbeam-channel 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-preview 0.3.0-alpha.19 (registry+https://github.com/rust-lang/crates.io-index)",
  "num_cpus 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "pin-utils 0.1.0-alpha.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -133,14 +132,9 @@ name = "slotmap"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
-[[package]]
-name = "smallvec"
-version = "0.6.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-
 [metadata]
 "checksum cfg-if 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)" = "b486ce3ccf7ffd79fdeb678eac06a9e6c09fc88d33836340becb8fffe87c5e33"
-"checksum crossbeam-channel 0.3.8 (registry+https://github.com/rust-lang/crates.io-index)" = "0f0ed1a4de2235cabda8558ff5840bffb97fcb64c97827f354a451307df5f72b"
+"checksum crossbeam-channel 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)" = "c8ec7fcd21571dc78f96cc96243cab8d8f035247c3efd16c687be154c3fa9efa"
 "checksum crossbeam-utils 0.6.5 (registry+https://github.com/rust-lang/crates.io-index)" = "f8306fcef4a7b563b76b7dd949ca48f52bc1141aa067d2ea09565f3e2652aa5c"
 "checksum futures-channel-preview 0.3.0-alpha.19 (registry+https://github.com/rust-lang/crates.io-index)" = "d5e5f4df964fa9c1c2f8bddeb5c3611631cacd93baf810fc8bb2fb4b495c263a"
 "checksum futures-core-preview 0.3.0-alpha.19 (registry+https://github.com/rust-lang/crates.io-index)" = "b35b6263fb1ef523c3056565fa67b1d16f0a8604ff12b11b08c25f28a734c60a"
@@ -156,4 +150,3 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum pin-utils 0.1.0-alpha.4 (registry+https://github.com/rust-lang/crates.io-index)" = "5894c618ce612a3fa23881b152b608bafb8c56cfc22f434a3ba3120b40f7b587"
 "checksum slab 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)" = "c111b5bd5695e56cffe5129854aa230b39c93a305372fdbb2668ca2394eea9f8"
 "checksum slotmap 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "c46a3482db8f247956e464d783693ece164ca056e6e67563ee5505bdb86452cd"
-"checksum smallvec 0.6.10 (registry+https://github.com/rust-lang/crates.io-index)" = "ab606a9c5e214920bb66c458cd7be8ef094f813f20fe77a54cc7dbfff220d4b7"
