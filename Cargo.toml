@@ -5,7 +5,7 @@ authors = ["PvdBerg1998 <PvdBerg1998@users.noreply.github.com>"]
 edition = "2018"
 
 [dependencies]
-crossbeam-channel = "^0.3"
+crossbeam-channel = "^0.4"
 futures-preview = "=0.3.0-alpha.19"
 num_cpus = "^1.10"
 pin-utils = "^0.1.0-alpha.4"
